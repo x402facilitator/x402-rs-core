@@ -20,9 +20,14 @@
 
 use std::borrow::Borrow;
 use std::collections::HashMap;
+use std::sync::Arc;
+
+use dashmap::DashMap;
 
 use crate::chain::FromEnvByNetworkBuild;
 use crate::chain::NetworkProvider;
+use crate::chain::solana::SolanaProvider;
+use crate::from_env;
 use crate::network::Network;
 
 /// A cache of pre-initialized [`EthereumProvider`] instances keyed by network.
@@ -88,5 +93,74 @@ impl ProviderMap for ProviderCache {
 
     fn values(&self) -> impl Iterator<Item = &Self::Value> {
         self.providers.values()
+    }
+}
+
+/// A cache of Solana providers keyed by (network, index) for mnemonic-based derivation.
+///
+/// This cache lazily creates SolanaProvider instances from mnemonic phrases using BIP44 derivation.
+/// Providers are cached to avoid recreating them on every request.
+///
+/// The cache is thread-safe and can be shared across multiple request handlers.
+#[derive(Clone)]
+pub struct SolanaProviderCache {
+    providers: Arc<DashMap<(Network, u32), SolanaProvider>>,
+}
+
+impl SolanaProviderCache {
+    /// Creates a new empty cache.
+    pub fn new() -> Self {
+        Self {
+            providers: Arc::new(DashMap::new()),
+        }
+    }
+
+    /// Gets or creates a Solana provider for the given network and mnemonic index.
+    ///
+    /// This method will:
+    /// 1. Check if a provider already exists in the cache
+    /// 2. If not, create a new provider from the mnemonic using the index
+    /// 3. Cache and return the provider
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The mnemonic environment variable is not set
+    /// - The mnemonic is invalid
+    /// - The RPC URL for the network is not configured
+    /// - The provider cannot be created
+    pub fn get_or_create(
+        &self,
+        network: Network,
+        index: u32,
+    ) -> Result<Arc<SolanaProvider>, Box<dyn std::error::Error>> {
+        let key = (network, index);
+
+        println!("Getting or creating provider for key: {:?}", key);
+        // Try to get from cache first (thread-safe check)
+        if let Some(entry) = self.providers.get(&key) {
+            return Ok(Arc::new(entry.clone()));
+        }
+
+        // Create new provider (outside of lock to avoid blocking)
+        let keypair = from_env::SignerType::make_solana_wallet_from_mnemonic(index)?;
+
+        let rpc_env_name = from_env::rpc_env_name_from_network(network);
+        let rpc_url = std::env::var(rpc_env_name)
+            .map_err(|_| format!("RPC URL not configured for network {:?}", network))?;
+
+        let provider = SolanaProvider::try_new(keypair, rpc_url, network)
+            .map_err(|e| format!("Failed to create Solana provider: {}", e))?;
+
+        // Use entry API to atomically insert if not present
+        // If another thread inserted in the meantime, use the existing one
+        let entry = self.providers.entry(key).or_insert(provider);
+        Ok(Arc::new(entry.clone()))
+    }
+}
+
+impl Default for SolanaProviderCache {
+    fn default() -> Self {
+        Self::new()
     }
 }

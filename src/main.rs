@@ -28,7 +28,7 @@ use std::sync::Arc;
 use tower_http::cors;
 
 use crate::facilitator_local::FacilitatorLocal;
-use crate::provider_cache::ProviderCache;
+use crate::provider_cache::{ProviderCache, SolanaProviderCache};
 use crate::sig_down::SigDown;
 use crate::telemetry::Telemetry;
 
@@ -72,7 +72,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
     let facilitator = FacilitatorLocal::new(provider_cache);
-    let axum_state = Arc::new(facilitator);
+    let facilitator_state = Arc::new(facilitator);
+    let solana_cache: SolanaProviderCache = SolanaProviderCache::new();
+    let axum_state = (facilitator_state, solana_cache);
 
     let http_endpoints = Router::new()
         .merge(handlers::routes().with_state(axum_state))

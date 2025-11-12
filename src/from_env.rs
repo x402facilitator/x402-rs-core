@@ -1,15 +1,19 @@
 use crate::network::Network;
 use alloy::network::EthereumWallet;
 use alloy::signers::local::PrivateKeySigner;
+use bip39::Mnemonic;
+use ed25519_dalek_bip32::DerivationPath;
 use serde::Deserialize;
 use serde::Serialize;
 use solana_sdk::signature::Keypair;
+use solana_sdk::signer::SeedDerivable;
 use std::env;
 use std::str::FromStr;
 
 pub const ENV_SIGNER_TYPE: &str = "SIGNER_TYPE";
 pub const ENV_EVM_PRIVATE_KEY: &str = "EVM_PRIVATE_KEY";
 pub const ENV_SOLANA_PRIVATE_KEY: &str = "SOLANA_PRIVATE_KEY";
+pub const ENV_SOLANA_MNEMONIC: &str = "SOLANA_MNEMONIC";
 
 pub const ENV_RPC_BASE: &str = "RPC_URL_BASE";
 pub const ENV_RPC_BASE_SEPOLIA: &str = "RPC_URL_BASE_SEPOLIA";
@@ -45,6 +49,9 @@ pub enum SignerType {
     /// A local private key stored in the `EVM_PRIVATE_KEY` environment variable.
     #[serde(rename = "private-key")]
     PrivateKey,
+    /// A mnemonic phrase stored in the `SOLANA_MNEMONIC` environment variable.
+    #[serde(rename = "mnemonic")]
+    Mnemonic,
 }
 
 impl SignerType {
@@ -54,6 +61,7 @@ impl SignerType {
             env::var(ENV_SIGNER_TYPE).map_err(|_| format!("env {ENV_SIGNER_TYPE} not set"))?;
         match signer_type_string.as_str() {
             "private-key" => Ok(SignerType::PrivateKey),
+            "mnemonic" => Ok(SignerType::Mnemonic),
             _ => Err(format!("Unknown signer type {signer_type_string}").into()),
         }
     }
@@ -91,6 +99,9 @@ impl SignerType {
 
                 Ok(wallet)
             }
+            SignerType::Mnemonic => {
+                Err("Mnemonic signer type is only supported for Solana, not EVM".into())
+            }
         }
     }
 
@@ -102,7 +113,45 @@ impl SignerType {
                 let keypair = Keypair::from_base58_string(private_key.as_str());
                 Ok(keypair)
             }
+            SignerType::Mnemonic => {
+                // Default to index 0 for backward compatibility
+                Self::make_solana_wallet_from_mnemonic(0)
+            }
         }
+    }
+
+    /// Derives a Solana keypair from mnemonic phrase using BIP44 derivation path.
+    /// Uses the standard Solana derivation path: m/44'/501'/{account}'/0'
+    /// where account is the provided index.
+    pub fn make_solana_wallet_from_mnemonic(
+        index: u32,
+    ) -> Result<Keypair, Box<dyn std::error::Error>> {
+        let mnemonic_str = env::var(ENV_SOLANA_MNEMONIC)
+            .map_err(|_| format!("env {ENV_SOLANA_MNEMONIC} not set"))?;
+
+        let mnemonic =
+            Mnemonic::parse(&mnemonic_str).map_err(|e| format!("Invalid mnemonic: {}", e))?;
+
+        let seed: [u8; 64] = mnemonic.to_seed("");
+
+        // Solana uses BIP44 path: m/44'/501'/{account}'/0'
+        // where 501 is the coin type for Solana
+        let derivation_path = DerivationPath::from_str(&format!("m/44'/501'/{}'/0'", index))
+            .map_err(|e| format!("Invalid derivation path: {}", e))?;
+
+        let extended_key = ed25519_dalek_bip32::ExtendedSecretKey::from_seed(&seed)
+            .map_err(|e| format!("Failed to create extended key: {}", e))?;
+
+        let derived_key = extended_key
+            .derive(&derivation_path)
+            .map_err(|e| format!("Failed to derive key: {}", e))?;
+
+        let secret_key = derived_key.secret_key;
+
+        let keypair = Keypair::from_seed(secret_key.to_bytes().as_slice())
+            .map_err(|e| format!("Failed to create keypair: {}", e))?;
+
+        Ok(keypair)
     }
 }
 
