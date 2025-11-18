@@ -7,6 +7,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use solana_sdk::signature::Keypair;
 use solana_sdk::signer::SeedDerivable;
+use solana_sdk::signer::Signer;
 use std::env;
 use std::str::FromStr;
 
@@ -26,6 +27,9 @@ pub const ENV_RPC_POLYGON_AMOY: &str = "RPC_URL_POLYGON_AMOY";
 pub const ENV_RPC_POLYGON: &str = "RPC_URL_POLYGON";
 pub const ENV_RPC_SEI: &str = "RPC_URL_SEI";
 pub const ENV_RPC_SEI_TESTNET: &str = "RPC_URL_SEI_TESTNET";
+
+pub const ENV_SETTLE_TRANSACTION_API_URL: &str = "SETTLE_TRANSACTION_API_URL";
+pub const ENV_SETTLE_TRANSACTION_API_KEY: &str = "SETTLE_TRANSACTION_API_KEY";
 
 pub fn rpc_env_name_from_network(network: Network) -> &'static str {
     match network {

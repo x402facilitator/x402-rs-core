@@ -14,17 +14,109 @@ use axum::http::StatusCode;
 use axum::response::Response;
 use axum::routing::{get, post};
 use axum::{Json, Router, response::IntoResponse};
+use serde::Serialize;
 use serde_json::json;
 use tracing::instrument;
 
 use crate::chain::FacilitatorLocalError;
 use crate::facilitator::Facilitator;
+use crate::from_env::{ENV_SETTLE_TRANSACTION_API_KEY, ENV_SETTLE_TRANSACTION_API_URL};
 use crate::network::Network;
 use crate::provider_cache::SolanaProviderCache;
 use crate::types::{
-    ErrorResponse, FacilitatorErrorReason, MixedAddress, SettleRequest, VerifyRequest,
-    VerifyResponse,
+    ErrorResponse, FacilitatorErrorReason, MixedAddress, SettleRequest, SettleResponse,
+    VerifyRequest, VerifyResponse,
 };
+use std::env;
+
+/// Request body for saving settle transaction to external API
+#[derive(Debug, Serialize)]
+struct SettleTransactionRequest {
+    transaction: String,
+    success: bool,
+    network: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    payer: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error_reason: Option<String>,
+}
+
+/// Helper function to save settle transaction to external API
+/// This function logs errors but does not fail the main request
+#[instrument(skip_all)]
+async fn save_settle_transaction(response: &SettleResponse) {
+    // Only save if transaction exists and is for Solana networks
+    let network_str = match response.network {
+        Network::Solana => "solana",
+        Network::SolanaDevnet => "solana-devnet",
+        _ => {
+            tracing::debug!(
+                network = ?response.network,
+                "Skipping save_settle_transaction for non-Solana network"
+            );
+            return;
+        }
+    };
+
+    let transaction = match &response.transaction {
+        Some(tx) => tx.to_string(),
+        None => {
+            tracing::debug!("Skipping save_settle_transaction: no transaction hash");
+            return;
+        }
+    };
+
+    let payer = Some(response.payer.to_string());
+    let error_reason = response.error_reason.as_ref().map(|r| format!("{:?}", r));
+
+    let request_body = SettleTransactionRequest {
+        transaction,
+        success: response.success,
+        network: network_str.to_string(),
+        payer,
+        error_reason,
+    };
+
+    // Get URL from environment variable, default to localhost if not set
+    let url = env::var(ENV_SETTLE_TRANSACTION_API_URL)
+        .unwrap_or_else(|_| "http://localhost:9999/client/transaction/settle".to_string());
+
+    // Get API key from environment variable (optional)
+    let api_key = env::var(ENV_SETTLE_TRANSACTION_API_KEY).ok();
+
+    let client = reqwest::Client::new();
+    let mut request = client.post(&url).json(&request_body);
+
+    // Add API key to header if provided
+    if let Some(key) = &api_key {
+        request = request.header("x-api-key", key);
+    }
+
+    tracing::info!("Saving settle transaction to external API: {}", url);
+    tracing::info!("Request body: {:?}", request_body);
+
+    match request.send().await {
+        Ok(resp) => {
+            if resp.status().is_success() {
+                tracing::info!(
+                    transaction = %request_body.transaction,
+                    "Successfully saved settle transaction"
+                );
+            } else {
+                tracing::warn!(
+                    status = %resp.status(),
+                    "Failed to save settle transaction: non-success status"
+                );
+            }
+        }
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "Failed to save settle transaction: request error"
+            );
+        }
+    }
+}
 
 /// `GET /verify`: Returns a machine-readable description of the `/verify` endpoint.
 ///
@@ -181,7 +273,14 @@ pub async fn post_settle_with_index(
 
     // Settle the request
     match provider.settle(&body).await {
-        Ok(valid_response) => (StatusCode::OK, Json(valid_response)).into_response(),
+        Ok(valid_response) => {
+            // Save transaction to external API in background
+            let response_clone = valid_response.clone();
+            tokio::spawn(async move {
+                save_settle_transaction(&response_clone).await;
+            });
+            (StatusCode::OK, Json(valid_response)).into_response()
+        }
         Err(error) => {
             tracing::warn!(
                 error = ?error,
@@ -265,7 +364,14 @@ where
     A::Error: IntoResponse,
 {
     match facilitator.settle(&body).await {
-        Ok(valid_response) => (StatusCode::OK, Json(valid_response)).into_response(),
+        Ok(valid_response) => {
+            // Save transaction to external API in background
+            let response_clone = valid_response.clone();
+            tokio::spawn(async move {
+                save_settle_transaction(&response_clone).await;
+            });
+            (StatusCode::OK, Json(valid_response)).into_response()
+        }
         Err(error) => {
             tracing::warn!(
                 error = ?error,
